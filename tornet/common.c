@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,24 +22,49 @@ void _exit(int ret) {
 	exit(ret);
 }
 
-void exit_with_error(const char *str) {
-	printf("%s\n", str);
+void exit_with_error(const char *format, ...) {
+	va_list vl;
+
+	va_start(vl, format);
+	vprintf(format, vl);
+	va_end(vl);
+
+	printf("\n");
+
 	_exit(1);
 }
 
-void _log(const char *str) {
+void _log(const char *format, ...) {
 	if (!logfile)
 		exit_with_error("Log file is not initialized.");
 
-	size_t len = strlen(str), ret = fwrite((void *) str, sizeof(char), len, logfile);
+	va_list vl;
 
-	printf("[%s]: %s\n", TORNET_LOG_NAME, str);
-	if (ret < len)
-		exit_with_error("Failed to write log.");
+	va_start(vl, format);
+	printf("[%s]: ", TORNET_LOG_NAME);
+	vprintf(format, vl);
+	va_end(vl);
+
+	printf("\n");
+
+	va_start(vl, format);
+	vfprintf(logfile, format, vl);
+	va_end(vl);
+
 	fwrite("\n", sizeof(char), 1, logfile);
 }
-void _logd(const char *str) {
+void _logd(const char *format, ...) {
 #ifdef DEBUG
-	_log(str);
+	_log(format);
 #endif
+}
+const char *get_logo() {
+	return "+-------------------------------------------------------+ \n"
+		   "|  ████████╗ ██████╗ ██████╗ ███╗   ██╗███████╗████████╗| \n"
+		   "|  ╚══██╔══╝██╔═══██╗██╔══██╗████╗  ██║██╔════╝╚══██╔══╝| \n"
+		   "|     ██║   ██║   ██║██████╔╝██╔██╗ ██║█████╗     ██║   | \n"
+		   "|     ██║   ██║   ██║██╔══██╗██║╚██╗██║██╔══╝     ██║   | \n"
+		   "|     ██║   ╚██████╔╝██║  ██║██║ ╚████║███████╗   ██║   | \n"
+		   "|     ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝   | \n"
+		   "+-------------------------------------------------------+ \n";
 }

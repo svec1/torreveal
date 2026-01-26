@@ -1,6 +1,6 @@
 #include <errno.h>
+#include <getopt.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,16 +21,25 @@ atomic_bool to_reload_tor;
 
 enum tor_management_error { failed_to_run = 1, failed_to_kill, failed_to_reload };
 
-int spawn_process(char *const argv[]) {
+int spawn_process(char *const argv[], int newfd, int fd) {
 	int pid;
 	if ((pid = fork()) == -1)
 		return -1;
 	else if (!pid) {
+		if (newfd != -1) {
+			dup2(newfd, fd);
+			close(newfd);
+		}
+
 		if (execvp(argv[0], argv))
 			exit_with_error("Failed to execute proccess");
 	}
 
 	return pid;
+}
+
+int pure_spawn_process(char *const argv[]) {
+	return spawn_process(argv, -1, 0);
 }
 
 int wait_process(int pid) {
@@ -52,7 +61,7 @@ int manage_tor() {
 	while (atomic_load(&working)) {
 		thrd_sleep(&(struct timespec) { .tv_nsec = 10 * MS_TO_NS }, NULL);
 		if (atomic_load(&to_run_tor)) {
-			int ret_call = wait_process(spawn_process(start_tor));
+			int ret_call = wait_process(pure_spawn_process(start_tor));
 			if (ret_call != 0) {
 				ret = failed_to_run;
 				break;
@@ -60,7 +69,7 @@ int manage_tor() {
 
 			atomic_store(&to_run_tor, 0);
 		} else if (atomic_load(&to_reload_tor)) {
-			int ret_call = wait_process(spawn_process(reload_tor));
+			int ret_call = wait_process(pure_spawn_process(reload_tor));
 			if (ret_call != 0) {
 				ret = failed_to_reload;
 				break;
@@ -71,9 +80,30 @@ int manage_tor() {
 	}
 
 	atomic_store(&working, 0);
-	wait_process(spawn_process(stop_tor));
+	wait_process(pure_spawn_process(stop_tor));
 
 	return ret;
+}
+
+int check_running(const char *program) {
+	int pipefd[2];
+	if (pipe(pipefd) == -1)
+		exit_with_error("Failed to check {}.", program);
+
+	int pid = 0;
+	char output[16];
+	char *run_grep[] = { "pgrep", "tor", NULL };
+
+	spawn_process(run_grep, pipefd[1], STDOUT_FILENO);
+	close(pipefd[1]);
+
+	if (read(pipefd[0], &output, 16) <= 0)
+		exit_with_error("Failed to read {}.", program);
+
+	for (int i = 0; i < 16 && output[i] != '\n' && output[i] != '\0'; ++i)
+		pid = pid * 10 + (output[i] - '0');
+
+	return pid;
 }
 
 void on_killswitch() {
@@ -96,17 +126,51 @@ void off_killswitch() {
 int main(int argc, char **argv) {
 	init_log();
 
+	printf("%s", get_logo());
+
+	check_running("tor");
+
 	atomic_init(&working, 1);
 	atomic_init(&to_run_tor, 1);
 	atomic_init(&to_reload_tor, 0);
+
+	int count = -1;
+	int delay = 1;
+	int on_ks = 0;
+
+	int opt;
+	while ((opt = getopt(argc, argv, ":d:c:")) != -1) {
+		switch (opt) {
+			case 'd':
+				delay = atoi(optarg);
+				if (delay < 1)
+					exit_with_error("The delay cannot be less than 1.");
+
+				break;
+			case 'c':
+				if (delay < 0)
+					exit_with_error("The number of reloads cannot be less than 0.");
+
+				count = atoi(optarg);
+				break;
+			case 'k':
+				on_ks = 1;
+				break;
+
+			case '?':
+				exit_with_error("Unknown option: %c", optopt);
+		}
+	}
+
+	if (on_ks)
+		on_killswitch();
 
 	thrd_t th_handle;
 	if (thrd_create(&th_handle, manage_tor, NULL))
 		exit_with_error("Cannot start manager of the tor process.");
 
-	int count = -1;
-	int delay = 1;
 
+	_log("Tor running: %i", check_running("tor"));
 	while (count && atomic_load(&working)) {
 		thrd_sleep(&(struct timespec) { .tv_sec = delay }, NULL);
 		atomic_store(&to_reload_tor, 1);
@@ -125,6 +189,9 @@ int main(int argc, char **argv) {
 			exit_with_error("Cannot kill the tor process.");
 			break;
 	}
+
+	if (on_ks)
+		off_killswitch();
 
 	_exit(0);
 }
