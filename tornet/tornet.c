@@ -11,7 +11,7 @@
 #define TORNET "tornet"
 #define TOR_PATH "/usr/bin/tor"
 #define MS_TO_NS 1000000
-#define TRIVIAL_LATENCY 10 * MS_TO_NS
+#define TRIVIAL_LATENCY 100 * MS_TO_NS
 
 atomic_bool working;
 atomic_bool to_run_tor;
@@ -19,9 +19,16 @@ atomic_bool to_reload_tor;
 
 enum tor_management_error { failed_to_run = 1, failed_to_kill, failed_to_reload };
 
+void thread_sleep_ms(size_t interval) {
+	thrd_sleep(&(struct timespec) { .tv_nsec = interval }, NULL);
+}
+void thread_sleep_s(size_t interval) {
+	thrd_sleep(&(struct timespec) { .tv_sec = interval }, NULL);
+}
+
 void sig_handler(int signal) {
 	atomic_store(&working, 0);
-	thrd_sleep(&(struct timespec) { .tv_nsec = TRIVIAL_LATENCY * 10 }, NULL);
+	thread_sleep_ms(TRIVIAL_LATENCY);
 	_log("Exit in progress...");
 	_exit(0);
 }
@@ -45,8 +52,7 @@ int manage_tor() {
 	char *reload_tor[] = { "systemctl", "reload", "tor", NULL };
 
 	while (atomic_load(&working)) {
-		thrd_sleep(&(struct timespec) { .tv_nsec = TRIVIAL_LATENCY }, NULL);
-		if (atomic_load(&to_run_tor) || !check_running("tor")) {
+		if (atomic_load(&to_run_tor) || !check_running(TOR_PATH)) {
 			int ret_call = wait_process(spawn_pure_process(start_tor));
 			if (ret_call != 0) {
 				ret = failed_to_run;
@@ -66,6 +72,7 @@ int manage_tor() {
 			if (get_ip(buffer, "socks5://localhost:9050/"))
 				_log("Was changed ip: %s", buffer);
 		}
+		thread_sleep_ms(TRIVIAL_LATENCY);
 	}
 
 	atomic_store(&working, 0);
@@ -105,7 +112,7 @@ int main(int argc, char **argv) {
 	char ip[16];
 	char *detach[] = { "self", NULL };
 	int count      = -1;
-	int delay      = 15;
+	int interval   = 15;
 	int on_ks      = 0;
 	int pid_tmp    = 0;
 
@@ -113,16 +120,16 @@ int main(int argc, char **argv) {
 	while ((opt = getopt(argc, argv, ":i:c:dks")) != -1) {
 		switch (opt) {
 			case 'i':
-				delay = atoi(optarg);
-				if (delay < 1)
+				interval = atoi(optarg);
+				if (interval < 1)
 					exit_with_error("The delay cannot be less than 1.");
 
 				break;
 			case 'c':
-				if (delay < 0)
+				count = atoi(optarg);
+				if (count < 0)
 					exit_with_error("The number of reloads cannot be less than 0.");
 
-				count = atoi(optarg);
 				break;
 			case 'd':
 				spawn_pure_process(detach);
@@ -148,10 +155,12 @@ int main(int argc, char **argv) {
 	if (thrd_create(&th_handle, manage_tor, NULL))
 		exit_with_error("Cannot start manager of the tor process.");
 
-	_log("Tor running: %i", check_running("tor"));
-	_log("Your own ip: %s", ip);
+	thread_sleep_ms(TRIVIAL_LATENCY);
+	_log("Tor running: %i", check_running(TOR_PATH));
+	_log("The ip address will change every: %is", interval);
+	_log("Your own ip address: %s", ip);
 	while (count && atomic_load(&working)) {
-		thrd_sleep(&(struct timespec) { .tv_sec = delay }, NULL);
+		thread_sleep_s(interval);
 		atomic_store(&to_reload_tor, 1);
 		if (count != -1)
 			--count;

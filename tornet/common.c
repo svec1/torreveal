@@ -108,20 +108,25 @@ int kill_process(int pid) {
 	return kill(pid, SIGINT);
 }
 
-int check_running(const char *program) {
+int check_running(char *program) {
 	int pipefd[2];
 	if (pipe(pipefd) == -1)
-		exit_with_error("Failed to check {}.", program);
+		exit_with_error("Failed to init pipe.");
 
 	int pid = 0;
 	char output[16];
-	char *run_grep[] = { "pgrep", "tor", NULL };
+	char *run_grep[] = { "pgrep", "-f", program, NULL };
 
 	spawn_process(run_grep, pipefd[1], STDOUT_FILENO);
 	close(pipefd[1]);
 
-	if (read(pipefd[0], &output, 16) <= 0)
-		exit_with_error("Failed to read {}.", program);
+	output[0] = '\0';
+	if (read(pipefd[0], &output, 16) < 0)
+		exit_with_error("Failed to check %s.", program);
+	close(pipefd[0]);
+
+	if (!output[0])
+		return 0;
 
 	for (int i = 0; i < 16 && output[i] != '\n' && output[i] != '\0'; ++i)
 		pid = pid * 10 + (output[i] - '0');

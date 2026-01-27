@@ -16,7 +16,7 @@ int spawn_process(char *const argv[], int newfd, int fd);
 int spawn_pure_process(char *const argv[]);
 int wait_process(int pid);
 int kill_process(int pid);
-int check_running(const char *program);
+int check_running(char *program);
 
 size_t curl_request(const char *const url, const char *const proxy,
 					size_t (*write_callback)(char *, size_t, size_t, void *), void *userdata);
