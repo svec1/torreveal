@@ -1,19 +1,17 @@
-#include <errno.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/wait.h>
 #include <threads.h>
 #include <unistd.h>
 
 #include "common.h"
 
+#define TORNET "tornet"
 #define TOR_PATH "/usr/bin/tor"
-
 #define MS_TO_NS 1000000
+#define TRIVIAL_LATENCY 10 * MS_TO_NS
 
 atomic_bool working;
 atomic_bool to_run_tor;
@@ -21,47 +19,35 @@ atomic_bool to_reload_tor;
 
 enum tor_management_error { failed_to_run = 1, failed_to_kill, failed_to_reload };
 
-int spawn_process(char *const argv[], int newfd, int fd) {
-	int pid;
-	if ((pid = fork()) == -1)
-		return -1;
-	else if (!pid) {
-		if (newfd != -1) {
-			dup2(newfd, fd);
-			close(newfd);
-		}
+void sig_handler(int signal) {
+	atomic_store(&working, 0);
+	thrd_sleep(&(struct timespec) { .tv_nsec = TRIVIAL_LATENCY * 10 }, NULL);
+	_log("Exit in progress...");
+	_exit(0);
+}
 
-		if (execvp(argv[0], argv))
-			exit_with_error("Failed to execute proccess");
+int get_ip(char *buffer, char *const proxy) {
+	size_t ret;
+	const char *const url = "https://api.ipify.org/";
+
+	if ((ret = curl_request(url, proxy, curl_write_callback_impl, buffer))) {
+		_log("Failed to get response(%s): %s", url, get_curl_error(ret));
+		return 0;
 	}
-
-	return pid;
-}
-
-int pure_spawn_process(char *const argv[]) {
-	return spawn_process(argv, -1, 0);
-}
-
-int wait_process(int pid) {
-	int status;
-	waitpid(pid, &status, 0);
-
-	if (WIFEXITED(status))
-		return WEXITSTATUS(status);
-	return -1;
+	return 1;
 }
 
 int manage_tor() {
+	enum tor_management_error ret = 0;
+
 	char *start_tor[]  = { "systemctl", "start", "tor", NULL };
 	char *stop_tor[]   = { "systemctl", "stop", "tor", NULL };
 	char *reload_tor[] = { "systemctl", "reload", "tor", NULL };
 
-	enum tor_management_error ret = 0;
-
 	while (atomic_load(&working)) {
-		thrd_sleep(&(struct timespec) { .tv_nsec = 10 * MS_TO_NS }, NULL);
-		if (atomic_load(&to_run_tor)) {
-			int ret_call = wait_process(pure_spawn_process(start_tor));
+		thrd_sleep(&(struct timespec) { .tv_nsec = TRIVIAL_LATENCY }, NULL);
+		if (atomic_load(&to_run_tor) || !check_running("tor")) {
+			int ret_call = wait_process(spawn_pure_process(start_tor));
 			if (ret_call != 0) {
 				ret = failed_to_run;
 				break;
@@ -69,41 +55,23 @@ int manage_tor() {
 
 			atomic_store(&to_run_tor, 0);
 		} else if (atomic_load(&to_reload_tor)) {
-			int ret_call = wait_process(pure_spawn_process(reload_tor));
+			int ret_call = wait_process(spawn_pure_process(reload_tor));
 			if (ret_call != 0) {
 				ret = failed_to_reload;
 				break;
 			}
 			atomic_store(&to_reload_tor, 0);
-			_log("Was changed ip.");
+
+			char buffer[16];
+			if (get_ip(buffer, "socks5://localhost:9050/"))
+				_log("Was changed ip: %s", buffer);
 		}
 	}
 
 	atomic_store(&working, 0);
-	wait_process(pure_spawn_process(stop_tor));
+	wait_process(spawn_pure_process(stop_tor));
 
 	return ret;
-}
-
-int check_running(const char *program) {
-	int pipefd[2];
-	if (pipe(pipefd) == -1)
-		exit_with_error("Failed to check {}.", program);
-
-	int pid = 0;
-	char output[16];
-	char *run_grep[] = { "pgrep", "tor", NULL };
-
-	spawn_process(run_grep, pipefd[1], STDOUT_FILENO);
-	close(pipefd[1]);
-
-	if (read(pipefd[0], &output, 16) <= 0)
-		exit_with_error("Failed to read {}.", program);
-
-	for (int i = 0; i < 16 && output[i] != '\n' && output[i] != '\0'; ++i)
-		pid = pid * 10 + (output[i] - '0');
-
-	return pid;
 }
 
 void on_killswitch() {
@@ -125,23 +93,26 @@ void off_killswitch() {
 
 int main(int argc, char **argv) {
 	init_log();
+	signal(SIGINT, sig_handler);
+	signal(SIGTERM, sig_handler);
 
 	printf("%s", get_logo());
-
-	check_running("tor");
 
 	atomic_init(&working, 1);
 	atomic_init(&to_run_tor, 1);
 	atomic_init(&to_reload_tor, 0);
 
-	int count = -1;
-	int delay = 1;
-	int on_ks = 0;
+	char ip[16];
+	char *detach[] = { "self", NULL };
+	int count      = -1;
+	int delay      = 15;
+	int on_ks      = 0;
+	int pid_tmp    = 0;
 
 	int opt;
-	while ((opt = getopt(argc, argv, ":d:c:")) != -1) {
+	while ((opt = getopt(argc, argv, ":i:c:dks")) != -1) {
 		switch (opt) {
-			case 'd':
+			case 'i':
 				delay = atoi(optarg);
 				if (delay < 1)
 					exit_with_error("The delay cannot be less than 1.");
@@ -153,10 +124,16 @@ int main(int argc, char **argv) {
 
 				count = atoi(optarg);
 				break;
+			case 'd':
+				spawn_pure_process(detach);
+				return 0;
 			case 'k':
+				pid_tmp = check_running(TORNET);
+				kill_process(pid_tmp);
+				break;
+			case 's':
 				on_ks = 1;
 				break;
-
 			case '?':
 				exit_with_error("Unknown option: %c", optopt);
 		}
@@ -165,12 +142,14 @@ int main(int argc, char **argv) {
 	if (on_ks)
 		on_killswitch();
 
+	get_ip(ip, "");
+
 	thrd_t th_handle;
 	if (thrd_create(&th_handle, manage_tor, NULL))
 		exit_with_error("Cannot start manager of the tor process.");
 
-
 	_log("Tor running: %i", check_running("tor"));
+	_log("Your own ip: %s", ip);
 	while (count && atomic_load(&working)) {
 		thrd_sleep(&(struct timespec) { .tv_sec = delay }, NULL);
 		atomic_store(&to_reload_tor, 1);
@@ -193,5 +172,5 @@ int main(int argc, char **argv) {
 	if (on_ks)
 		off_killswitch();
 
-	_exit(0);
+	exit(0);
 }
