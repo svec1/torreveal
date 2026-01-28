@@ -7,8 +7,7 @@ Made with 🤍 for the privacy-conscious community.
 ##### Automate IP address changes using the Tor network with advanced privacy features.
 
 </div>
-
----
+<br>
 
 ### Basic Usage
 
@@ -18,7 +17,6 @@ tornet -i 60 -c 10
 
 # Check status
 tornet -s
- 
 ```
 
 ## Authors
